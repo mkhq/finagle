@@ -1,7 +1,7 @@
 package com.twitter.finagle.redis
 
 import com.twitter.finagle.Redis
-import com.twitter.finagle.redis.protocol.ClusterNode
+import com.twitter.finagle.redis.protocol.{ClusterNode, Slots}
 import com.twitter.finagle.redis.util.{RedisCluster, RedisMode}
 import com.twitter.io.Buf
 import com.twitter.util.{Await, Future}
@@ -25,14 +25,18 @@ trait ClusterClientTest extends RedisTest with BeforeAndAfterAll {
 
   override def afterAll(): Unit = RedisCluster.stopAll()
 
+  protected def ownedSlots(client: ClusterClient): Future[Seq[Slots]] = {
+    for {
+      id <- client.nodeId()
+      slots <- client.slots
+    } yield slots.filter(_.master.id == id)
+  }
+ 
   protected def assertSlots(client: ClusterClient, expected: Seq[(Int, Int)]): Unit =  {
-    val id = Await.result(client.nodeId()).get
-    val slots = Await.result(client.slots)
+    val slots = Await.result(ownedSlots(client))
+    assert(slots.size == expected.size)
 
-    val slotsOnId = slots.filter(_.master.id == Some(id))
-    assert(slotsOnId.size == expected.size)
-
-    val orderedSlots = slotsOnId.map(s => (s.start, s.end)).sorted
+    val orderedSlots = slots.map(s => (s.start, s.end)).sorted
     assert(orderedSlots == expected)
   }
 
@@ -168,7 +172,7 @@ trait ClusterClientTest extends RedisTest with BeforeAndAfterAll {
   
   private def newClusterClient(index: Int): ClusterClient = {
     ClusterClient(
-      Redis.client.newClient(RedisCluster.hostAddresses(from = index, until = index + 1))
+      RedisCluster.hostAddresses(from = index, until = index + 1)
     )
   }
  

@@ -15,6 +15,9 @@ case class ClusterNode(
   flags: Seq[String]) {
   def isMyself(): Boolean =
     flags.contains("myself")
+
+  def hostPort: String =
+    s"${addr.getAddress.getHostAddress}:${addr.getPort}"
 }
 
 case class Slots(start: Int, end: Int, master: ClusterNode, replicas: Seq[ClusterNode])

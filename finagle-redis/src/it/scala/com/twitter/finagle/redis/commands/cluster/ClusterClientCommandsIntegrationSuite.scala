@@ -30,13 +30,14 @@ final class ClusterClientCommandsIntegrationSuite extends ClusterClientTest {
 
     // find the slot which will be removed and create new ranges
     val expectedSlotsA = slotsA.flatMap { s =>
-      if(s.start <= slotId && slotId <= s.end) Seq((s.start, slotId), (slotId, s.end))
+      if(s.start <= slotId && slotId <= s.end) Seq((s.start, slotId-1), (slotId+1, s.end))
       else Seq((s.start, s.end))
     }.sorted
     
     val expectedSlotsB = slotsB
       .map(s => (s.start, s.end))
-      .toList.sorted
+      .toList ++ List((slotId, slotId))
+      .sorted
       .foldLeft[List[(Int, Int)]](List()) {
         // merge two ranges when end and start are adjacent
         case (Nil, (start, end)) => List((start, end))
@@ -73,8 +74,26 @@ final class ClusterClientCommandsIntegrationSuite extends ClusterClientTest {
       val newKey = Buf.Utf8("fuzz")
       Await.result(c.set(newKey, value))
       assert(Await.result(a.get(newKey)) == Some(value))
-    }
- 
+    } 
+  }
+
+  test("Correctly set/get the value of a single key when resharding", RedisTest, ClientTest) {
+    withClusterClients(0, 1, 2) { case Seq(a, b, c) =>
+      val key = Buf.Utf8("6ff70029") // slot 42
+      val value = Buf.Utf8("bar")
+
+      // test the server that is responsible
+      Await.result(a.set(key, value))
+      assert(Await.result(a.getKeysInSlot(42)) == Seq(key))
+      assert(Await.result(b.getKeysInSlot(42)) == Seq())
+
+      reshardAssert(a, b, 42)
+
+      assert(Await.result(b.getKeysInSlot(42)) == Seq(key))
+
+      // retrieve the value from another server (ASK redirect)
+      assert(Await.result(a.get(key)) == Some(value))
+    } 
   }
 }
 

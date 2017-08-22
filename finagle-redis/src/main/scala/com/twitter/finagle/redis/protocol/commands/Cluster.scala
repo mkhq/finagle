@@ -52,6 +52,10 @@ case class GetKeysInSlot(slot: Int, count: Int)
 
 case class Nodes() extends Cluster("NODES")
 
+case class Asking() extends Command {
+  def name: Buf = Command.ASKING
+}
+
 abstract class Cluster(sub: String, args: Seq[String] = Seq()) extends Command {
   def name: Buf = Command.CLUSTER
 

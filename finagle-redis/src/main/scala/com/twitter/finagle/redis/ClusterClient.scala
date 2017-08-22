@@ -8,21 +8,70 @@ import com.twitter.hashing.Hashable
 
 object ClusterClient {
   /**
-   * Construct a cluster client from a single bootstrap host.
+   * Construct a single cluster client from a single bootstrap host.
    * @param host a String of host:port combination.
    */
-  def apply(host: String): ClusterClient =
-    ClusterClient(Seq(host))
+  def apply(host: String): ClusterSingleClient =
+    ClusterClient(Redis.newClient(host))
 
   /**
-   * Construct a cluster client from a list of bootstrap hosts.
+   * Construct a single cluster client from a service factory
    * @param hosts a sequence of String of host:port combination.
    */
-  def apply(hosts: Seq[String]): ClusterClient = {
-    new ClusterClient(hosts)
+  def apply(raw: ServiceFactory[Command, Reply]): ClusterSingleClient = {
+    new ClusterSingleClient(raw)
   }
 
-  val CRC16_XMODEM = new Hashable[Buf, Short] {
+  /**
+   * Construct a redirecting cluster client from a list of bootstrap hosts.
+   * @param hosts a sequence of String of host:port combination.
+   */
+  def apply(hosts: Seq[String], maxRedirects: Int = 5): ClusterRedirectingClient = {
+    new ClusterRedirectingClient(hosts, maxRedirects = maxRedirects)
+  }
+
+}
+
+trait ClusterClient
+extends ClusterCommands
+with NormalCommands
+with Closable {
+  self: BaseClient =>
+
+  override def select(index: Int): Future[Unit] =
+    Future.exception(new Exception("Not supported by Redis Cluster"))
+}
+
+class ClusterSingleClient(factory: ServiceFactory[Command, Reply])
+  extends BaseSingleClient(factory)
+  with ClusterClient {
+
+  private val Moved = "MOVED"
+  private val Ask = "ASK"
+
+  private[redis] override def doRequest[T](
+    cmd: Command
+  )(handler: PartialFunction[Reply, Future[T]]): Future[T] = {
+    super.doRequest(cmd)(handler)
+      .rescue {
+        case ServerError(msg) if msg.startsWith(Moved) =>
+          val Array(_, slotId, host) = msg.split(" ")
+          Future.exception(ClusterMovedError(slotId.toInt, host))
+
+        case ServerError(msg) if msg.startsWith(Ask) =>
+          val Array(_, slotId, host) = msg.split(" ")
+          Future.exception(ClusterAskError(slotId.toInt, host))
+      }
+  }
+}
+
+
+class ClusterRedirectingClient(hosts: Seq[String], maxRedirects: Int = 5)
+    extends BaseClient
+    with ClusterClient
+    with Closable {
+
+  private[this] val CRC16_XMODEM = new Hashable[Buf, Short] {
     private val lookup: Array[Int] = Array(
       0x0000,0x1021,0x2042,0x3063,0x4084,0x50a5,0x60c6,0x70e7,
       0x8108,0x9129,0xa14a,0xb16b,0xc18c,0xd1ad,0xe1ce,0xf1ef,
@@ -58,8 +107,8 @@ object ClusterClient {
       0x6e17,0x7e36,0x4e55,0x5e74,0x2e93,0x3eb2,0x0ed1,0x1ef0
     )
 
-    def apply(key: Buf): Short = {
-      val bytes = Buf.ByteArray.Owned.extract(key)
+    def apply(buf: Buf): Short = {
+      val bytes = Buf.ByteArray.Owned.extract(buf)
       var crc: Short = 0
 
       for(b <- bytes) {
@@ -69,39 +118,29 @@ object ClusterClient {
       crc
     }
   }
-}
 
-class ClusterClient(hosts: Seq[String])
-    extends BaseClient
-    with NormalCommands
-    with ClusterCommands
-    with Closable {
-
-  private val Moved = "MOVED"
-  private val MaxRedirects = 10
   private val TotalSlots = 16384
 
-  private var conns = Map[String, ServiceFactory[Command, Reply]]()
+  private var conns = Map[String, ClusterSingleClient]()
 
   // returns the <host>:<port> responsible for a slot
   private var slotServerMap = Array.fill[String](TotalSlots)(hosts.head)
 
-  private val crc16 = ClusterClient.CRC16_XMODEM
+  private val crc16 = CRC16_XMODEM
 
-  private def clientFor(host: String): ServiceFactory[Command, Reply] = {
+  private def clientFor(host: String): ClusterSingleClient = {
     conns.getOrElse(host, {
-      val factory = Redis.newClient(host)
+      val factory = ClusterClient(host)
       conns += (host -> factory)
       factory
     })
   }
 
-
   private[redis] def keyInSlot(key: Buf): Int = {
     crc16(key) & (TotalSlots - 1)
   }
 
-  private def clientForKey(key: Buf): ServiceFactory[Command, Reply] = {
+  private def clientForKey(key: Buf): ClusterSingleClient = {
     val slotId = keyInSlot(key)
     val server = slotServerMap(slotId)
     clientFor(server)
@@ -114,26 +153,29 @@ class ClusterClient(hosts: Seq[String])
 
   private def redirectRequest[T](
     cmd: Command,
-    client: ServiceFactory[Command, Reply],
-    remainingRedirects: Int = MaxRedirects
+    client: ClusterSingleClient,
+    redirects: Int = 0
   )(handler: PartialFunction[Reply, Future[T]]): Future[T] = {
-    client
-      .toService
-      .apply(cmd)
-      .flatMap(handler orElse {
-        case ErrorReply(message) if message.startsWith(Moved) =>
-          val Array(_, slotId, host) = message.split(" ")
+    if(redirects > maxRedirects) {
+      Future.exception(new ClusterTooManyRedirectsError())
+    } else {
+      client.doRequest(cmd)(handler)
+        .rescue {
+          case ClusterMovedError(slotId, host) =>
+            // received a MOVED, update the local slot -> server mapping
+            // fire and forget
+            slots().map(updateSlots)
 
-          // received a MOVED, update the local slot -> server mapping
-          // fire and forget
-          slots().map(updateSlots)
+            redirectRequest[T](cmd, clientFor(host), redirects + 1)(handler)
+          case ClusterAskError(slotId, host) =>
+            val client = clientFor(host)
 
-          redirectRequest[T](cmd, clientFor(host), remainingRedirects - 1)(handler)
-
-        case ErrorReply(message) => Future.exception(new ServerError(message))
-        case StatusReply("QUEUED") => Future.Done.asInstanceOf[Future[Nothing]]
-        case _ => Future.exception(new IllegalStateException)
-      })
+            for {
+              _ <- client.asking()
+              resp <- redirectRequest[T](cmd, client, redirects + 1)(handler)
+            } yield resp
+        }
+    }
   }
 
   private[redis] override def doRequest[T](
@@ -151,6 +193,5 @@ class ClusterClient(hosts: Seq[String])
     Future.join(conns.values.map(_.close(deadline)).toSeq)
   }
 
-  override def select(index: Int): Future[Unit] =
-    Future.exception(new Exception("Not supported by Redis Cluster"))
 }
+

@@ -227,4 +227,13 @@ private[redis] trait ClusterCommands { self: BaseClient with BasicServerCommands
     doRequest(Meet(addr)) {
       case StatusReply(_) => Future.Unit
     }
+
+  /**
+   * Send asking to the server as a preparation after an ask redirect
+   * @return unit
+   */
+  def asking(): Future[Unit] =
+    doRequest(Asking()) {
+      case StatusReply(_) => Future.Unit
+    }
 }

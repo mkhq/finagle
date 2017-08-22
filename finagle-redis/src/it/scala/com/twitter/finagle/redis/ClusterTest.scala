@@ -125,6 +125,37 @@ trait ClusterClientTest extends RedisTest with BeforeAndAfterAll {
     clients.foreach(_.close())
   }
 
+  protected def assertReshard(a: ClusterClient, b: ClusterClient, slotId: Int) = {
+    val slotsA = Await.result(ownedSlots(a))
+    val slotsB = Await.result(ownedSlots(b))
+
+    Await.result(reshard(a, b, Seq(slotId)))
+
+    // find the slot which will be removed and create new ranges
+    val expectedSlotsA = slotsA.flatMap { s =>
+      if(s.start <= slotId && slotId <= s.end) Seq((s.start, slotId-1), (slotId+1, s.end))
+      else Seq((s.start, s.end))
+    }.sorted
+   
+    // add the slot and figure out if we should merge any adjacent slots
+    val expectedSlotsB = slotsB
+      .map(s => (s.start, s.end))
+      .toList ++ List((slotId, slotId))
+      .sorted
+      .foldLeft[List[(Int, Int)]](List()) {
+        // merge two ranges when end and start are adjacent
+        case (Nil, (start, end)) => List((start, end))
+        case (acc :+ ((s, e)), (start, end)) if e + 1 == start => acc :+ (s, end)
+        case (acc, (start, end)) => acc :+ (start, end)
+      }
+
+    waitUntilAsserted(s"A is responsible for $expectedSlotsA and B for $expectedSlotsB") {
+      assertSlots(a, expectedSlotsA)
+      assertSlots(b, expectedSlotsB)
+    }
+  }
+
+
   private def migrateSlotKeys(src: ClusterClient, destAddr: InetSocketAddress, slot: Int): Future[Unit] = {
     def migrateKeys(keys: Seq[Buf]): Future[Unit] = {
       if(keys.size == 0) Future.Unit
@@ -142,8 +173,6 @@ trait ClusterClientTest extends RedisTest with BeforeAndAfterAll {
     } yield ()
 
   }
-
-
 
   private def reshardSingle(a: ClusterClient, aId: String, b: ClusterClient, bNode: ClusterNode)(slot: Int): Future[Unit] = for {
     // The protocol has four steps:
@@ -170,9 +199,16 @@ trait ClusterClientTest extends RedisTest with BeforeAndAfterAll {
   } yield ()
 
   
-  private def newClusterClient(index: Int): ClusterClient = {
+  private def newClusterClient(index: Int): ClusterSingleClient = {
     ClusterClient(
       RedisCluster.hostAddresses(from = index, until = index + 1)
+    )
+  }
+ 
+  private def newClusterRedirectingClient(index: Int, maxRedirects: Int = 5): ClusterRedirectingClient = {
+    ClusterClient(
+      Seq(RedisCluster.hostAddresses(from = index, until = index + 1)),
+      maxRedirects = maxRedirects
     )
   }
  
@@ -185,5 +221,11 @@ trait ClusterClientTest extends RedisTest with BeforeAndAfterAll {
     val clients = indices.map(newClusterClient)
     try { testCode(clients) } finally { clients.foreach(_.close()) }
   }
+
+  protected def withClusterRedirectingClients(maxRedirects: Int = 5)(indices: Int*)(testCode: Seq[ClusterClient] => Any) {
+    val clients = indices.map(i => newClusterRedirectingClient(i, maxRedirects = maxRedirects))
+    try { testCode(clients) } finally { clients.foreach(_.close()) }
+  }
+
 
 }

@@ -212,17 +212,17 @@ trait ClusterClientTest extends RedisTest with BeforeAndAfterAll {
     )
   }
  
-  protected def withClusterClient(index: Int)(testCode: ClusterClient => Any) {
+  protected def withClusterClient(index: Int)(testCode: ClusterSingleClient => Any) {
     val client = newClusterClient(index)
     try { testCode(client) } finally { client.close() }
   }
 
-  protected def withClusterClients(indices: Int*)(testCode: Seq[ClusterClient] => Any) {
+  protected def withClusterClients(indices: Int*)(testCode: Seq[ClusterSingleClient] => Any) {
     val clients = indices.map(newClusterClient)
     try { testCode(clients) } finally { clients.foreach(_.close()) }
   }
 
-  protected def withClusterRedirectingClients(maxRedirects: Int = 5)(indices: Int*)(testCode: Seq[ClusterClient] => Any) {
+  protected def withClusterRedirectingClients(maxRedirects: Int = 5)(indices: Int*)(testCode: Seq[ClusterRedirectingClient] => Any) {
     val clients = indices.map(i => newClusterRedirectingClient(i, maxRedirects = maxRedirects))
     try { testCode(clients) } finally { clients.foreach(_.close()) }
   }

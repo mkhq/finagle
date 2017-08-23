@@ -27,3 +27,8 @@ case class ClusterAskError(slotId: Int, host: String) extends Exception()
  * Thrown when a cluster client has been redirected too many times
  */
 case class ClusterTooManyRedirectsError() extends Exception("Reached maximum redirects")
+
+/**
+ * Thrown when a cluster client performs a multi-key operation during resharding
+ */
+case class ClusterTryAgainError() extends Exception()

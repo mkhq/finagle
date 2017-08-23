@@ -236,4 +236,14 @@ private[redis] trait ClusterCommands { self: BaseClient with BasicServerCommands
     doRequest(Asking()) {
       case StatusReply(_) => Future.Unit
     }
+
+  /**
+   * Ask the server what key slot corresponds to the key
+   * @param key a string of the key(s)
+   * @return long, number of the slot
+   */
+  def keySlot(key: String): Future[Long] =
+    doRequest(KeySlot(key)) {
+      case IntegerReply(id) => Future.value(id)
+    }
 }

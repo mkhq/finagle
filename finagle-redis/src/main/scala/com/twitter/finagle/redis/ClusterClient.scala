@@ -2,7 +2,7 @@ package com.twitter.finagle.redis
 
 import com.twitter.finagle.{ClientConnection, Redis, Service, ServiceFactory, ServiceFactoryProxy}
 import com.twitter.finagle.redis.protocol._
-import com.twitter.io.Buf
+import com.twitter.io.{Buf, ByteReader}
 import com.twitter.util.{Closable, Future, Time}
 import com.twitter.hashing.Hashable
 
@@ -48,6 +48,7 @@ class ClusterSingleClient(factory: ServiceFactory[Command, Reply])
 
   private val Moved = "MOVED"
   private val Ask = "ASK"
+  private val TryAgain = "TRYAGAIN"
 
   private[redis] override def doRequest[T](
     cmd: Command
@@ -61,6 +62,9 @@ class ClusterSingleClient(factory: ServiceFactory[Command, Reply])
         case ServerError(msg) if msg.startsWith(Ask) =>
           val Array(_, slotId, host) = msg.split(" ")
           Future.exception(ClusterAskError(slotId.toInt, host))
+
+        case ServerError(msg) if msg.startsWith(TryAgain) =>
+          Future.exception(ClusterTryAgainError())
       }
   }
 }
@@ -137,7 +141,18 @@ class ClusterRedirectingClient(hosts: Seq[String], maxRedirects: Int = 5)
   }
 
   private[redis] def keyInSlot(key: Buf): Int = {
-    crc16(key) & (TotalSlots - 1)
+    // implements the key hash tag algorithm from
+    // https://redis.io/topics/cluster-spec#keys-hash-tags
+    val reader = ByteReader(key)
+
+    val keyHashTag = for {
+      startIndex <- Option(reader.remainingUntil('{'))
+      if startIndex > -1
+      stopIndex <- Option(reader.remainingUntil('}'))
+      if stopIndex > -1 && stopIndex != startIndex + 1
+    } yield key.slice(startIndex+1, stopIndex)
+
+    crc16(keyHashTag.getOrElse(key)) & (TotalSlots - 1)
   }
 
   private def clientForKey(key: Buf): ClusterSingleClient = {
@@ -174,6 +189,9 @@ class ClusterRedirectingClient(hosts: Seq[String], maxRedirects: Int = 5)
               _ <- client.asking()
               resp <- redirectRequest[T](cmd, client, redirects + 1)(handler)
             } yield resp
+
+          case ClusterTryAgainError() =>
+            redirectRequest[T](cmd, client, redirects + 1)(handler)
         }
     }
   }

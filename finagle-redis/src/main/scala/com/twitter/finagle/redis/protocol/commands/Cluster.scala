@@ -56,6 +56,9 @@ case class Asking() extends Command {
   def name: Buf = Command.ASKING
 }
 
+case class KeySlot(key: String)
+  extends Cluster("KEYSLOT", Seq(key))
+
 abstract class Cluster(sub: String, args: Seq[String] = Seq()) extends Command {
   def name: Buf = Command.CLUSTER
 

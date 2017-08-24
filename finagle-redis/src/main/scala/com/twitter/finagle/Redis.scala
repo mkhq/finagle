@@ -42,7 +42,7 @@ trait RedisRichClient { self: Client[Command, Reply] =>
     redis.TransactionalClient(newClient(dest, label))
 
   def newClusterSingleClient(dest: Name, label: String): redis.ClusterSingleClient =
-    redis.ClusterSingleClient(newClient(dest, label))
+    redis.ClusterClient(newClient(dest, label))
 }
 
 object Redis extends Client[Command, Reply] with RedisRichClient {

@@ -30,7 +30,7 @@ with Closable {
   self: BaseClient =>
 
   override def select(index: Int): Future[Unit] =
-    Future.exception(new Exception("Not supported by Redis Cluster"))
+    Future.exception(new NotImplementedError("Not supported by Redis Cluster"))
 }
 
 class ClusterClient(factory: ServiceFactory[Command, Reply])
